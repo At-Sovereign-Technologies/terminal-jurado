@@ -14,6 +14,7 @@ import { crearNodoClient } from "../api/nodo.api";
 import { enviarHandshake, urlDeTerminal } from "../api/terminalVoto.api";
 import { subscribirseAEventosTerminal } from "../api/sidecarClient";
 import { registrarAsistencia } from "../api/asistencia.api";
+import { usePollingRevocacion } from "../config/usePollingRevocacion";
 import type {
     DeploymentVotante,
     DeploymentTerminal,
@@ -72,6 +73,41 @@ export default function JuradoApp() {
         | { votante: DeploymentVotante; terminalId: number }
         | null
     >(null);
+
+    // Polling: si el Servidor Electoral revoca el punto entero en caliente,
+    // bloqueamos la mesa del jurado. Si revoca terminales individuales, las
+    // marcamos como FUERA_DE_SERVICIO sin interrumpir al jurado.
+    const [puntoRevocado, setPuntoRevocado] = useState<string | null>(null);
+
+    usePollingRevocacion({
+        clusterUrl: config.clusterUrl,
+        secreto: config.secreto,
+        puntoId: punto.id,
+        onPuntoRevocado: (motivo) => setPuntoRevocado(motivo),
+        onTerminalesActualizadas: (terminalesRemotas) => {
+            setVistas((prev) =>
+                prev.map((v) => {
+                    const remota = terminalesRemotas.find(
+                        (x) => x.id === v.terminal.id
+                    );
+                    if (!remota) return v;
+                    // Si el Servidor Electoral revoca esta terminal, la
+                    // forzamos a FUERA_DE_SERVICIO. Si la reactiva y ya estaba
+                    // libre, no hacemos nada (no degradamos OCUPADA → LIBRE
+                    // sin que llegue el evento real del sidecar).
+                    if (!remota.activo) {
+                        return v.estado === "FUERA_DE_SERVICIO"
+                            ? v
+                            : { ...v, estado: "FUERA_DE_SERVICIO" };
+                    }
+                    if (v.estado === "FUERA_DE_SERVICIO") {
+                        return { ...v, estado: "LIBRE" };
+                    }
+                    return v;
+                })
+            );
+        },
+    });
 
     // Estado de cada terminal del punto: libre / ocupada / fuera de servicio.
     // Se inicializa según `activo`; los eventos del sidecar (VOTO_EMITIDO,
@@ -198,6 +234,27 @@ export default function JuradoApp() {
             setSesionAsistida(null);
         }
     };
+
+    if (puntoRevocado) {
+        return (
+            <main className="min-h-screen flex flex-col items-center justify-center bg-white text-center px-10">
+                <div className="w-24 h-24 rounded-full bg-red-100 flex items-center justify-center mb-6">
+                    <AlertCircle size={42} className="text-red-600" />
+                </div>
+                <h1 className="text-3xl font-extrabold text-gray-900">
+                    Mesa del Jurado revocada
+                </h1>
+                <p className="text-base text-gray-600 mt-3 max-w-xl">
+                    {puntoRevocado}
+                </p>
+                <p className="text-xs text-gray-400 mt-6 max-w-md">
+                    No se pueden autorizar nuevas sesiones. Contacte al
+                    operador del puesto para restablecer el servicio desde el
+                    Servidor Electoral.
+                </p>
+            </main>
+        );
+    }
 
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col">
