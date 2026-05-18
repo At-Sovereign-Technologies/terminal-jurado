@@ -46,11 +46,20 @@ El Jurado **escucha conexiones de las Terminales Voto del puesto**. Como un
 browser no puede recibir conexiones entrantes, el sidecar Node hace ese rol:
 
 - **Acepta WebSockets** de las Terminales Voto (puerto 8090).
+- **Autentica cada terminal** en el HELLO contra `deployment.yml` +
+  `jurado-config.json` (id + secreto compartido).
+- **Verifica la firma Ed25519** de cada voto con la clave pública de la
+  terminal antes de encolar o reenviar al Nodo.
 - **Reenvía votos** al Nodo de Votación Activa por HTTP.
 - **Guarda en cola local** (`sidecar/cola.json`) cuando el Nodo está caído.
 - **Reintenta cada 10 s** hasta drenar la cola.
+- **Recarga `deployment.yml` cada 30 s** para detectar revocaciones en
+  caliente (terminales o punto entero); cierra los WebSockets de las
+  terminales revocadas.
+- **Proxea al Nodo** las consultas del SPA (p. ej. `GET /votante/:doc`)
+  para que el SPA no tenga acceso directo al Nodo.
 - **Notifica al SPA del Jurado** por otro WebSocket (puerto 8087) de eventos
-  en vivo (voto emitido, cola pendiente).
+  en vivo: voto emitido, cola pendiente, terminal revocada, punto revocado.
 
 La Terminal Voto, en cambio, es 100% cliente: solo abre WebSockets, no
 acepta nada. Por eso esa no necesita sidecar.
@@ -170,15 +179,40 @@ no están sujetos a ese límite.
 ## Atributos de calidad
 
 - **Control de acceso** — el jurado consulta `votado` antes de autorizar.
-  Si el votante ya votó, no se permite re-autorizar.
+  Si el votante ya votó, no se permite re-autorizar. El sidecar autentica
+  cada Terminal Voto en el HELLO (id + secreto contra `deployment.yml`).
+- **Integridad** — el sidecar verifica la firma Ed25519 de cada voto con
+  la clave pública declarada en `deployment.yml` antes de encolar o
+  reenviar al Nodo. Además valida que el campo `terminal` del payload
+  coincida con la terminal autenticada (anti-spoofing).
 - **Trazabilidad** — cada autorización genera un `sesionToken` único; cada
   voto recibido por el sidecar se loguea con `terminal` y `votante`; la
   cola guarda intentos de retry.
+- **Revocación en caliente** — el sidecar recarga `deployment.yml` cada
+  30 s. Si el Servidor Electoral marca una terminal o el punto entero
+  como `activo: false`, el sidecar cierra los WebSockets afectados y
+  notifica al SPA del jurado (`TERMINAL_REVOCADA` / `PUNTO_REVOCADO`).
 - **Resiliencia (offline-first)** — si el Nodo está caído, los votos se
   encolan en disco (`sidecar/cola.json`) y el sidecar reintenta cada 10 s
-  hasta drenarlos. La jornada puede continuar sin Nodo.
+  hasta drenarlos. La jornada puede continuar sin Nodo. El SPA muestra
+  un badge ámbar en el header con la cuenta en vivo de votos en cola.
 - **Privacidad del voto asistido** — los documentos del acompañante nunca
   se persisten en claro; solo viaja el SHA-256 en el sesionToken.
+
+## Pruebas
+
+```bash
+npm test
+```
+
+Vitest corre los tests en `src/api/asistencia.api.test.ts`:
+
+- Acepta un acompañante no-familiar la primera vez en la jornada.
+- Rechaza el **mismo** acompañante no-familiar la segunda vez (CA #3 de
+  SE-M3-05).
+- Permite al mismo familiar acompañar a múltiples votantes (sin límite).
+- Normaliza espacios al comparar documentos: `"100000004"` y
+  `"  100000004  "` se consideran el mismo acompañante.
 
 ## Pendientes
 
@@ -187,9 +221,6 @@ no están sujetos a ese límite.
   con la clave del punto y la Terminal Voto debe verificarlo.
 - **Endpoint real del transparency-service para asistencia.** Hoy
   `registrarAsistencia` valida localmente en memoria.
-- **Polling al Nodo para revocación en caliente.** Si el Servidor Electoral
-  marca el punto entero como inactivo, hay que enterarse sin reiniciar.
-- **Pruebas unitarias.** Sin tests todavía. Pendiente cobertura de:
-  - Cola offline del sidecar (encolar / drenar / persistir a JSON).
-  - `registrarAsistencia` (límite no-familiar, exención de familiares).
-  - Multiplexor del sidecar (HELLO/VOTO/HANDSHAKE por WS).
+- **Más cobertura de tests del sidecar.** Falta cubrir: drenaje de la
+  cola offline contra un Nodo mock, multiplexor HELLO/VOTO/HANDSHAKE por
+  WS, y el flujo de revocación en caliente end-to-end.
