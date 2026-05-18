@@ -1,0 +1,60 @@
+eleccion:
+  id: 1
+  nombre: Elección Presidencial 2026
+  tipoEleccion: presidencial
+  fechaInicio: 1748678400
+  fechaFin: 1748707200
+
+candidatos:
+  - id: 1
+    nombre: Juan Pablo Rodríguez
+    documento: "1000000001"
+    partido: Partido Alpha
+    fotoUrl: ""
+  - id: 2
+    nombre: Elena Gómez
+    documento: "1000000002"
+    partido: Movimiento Beta
+    fotoUrl: ""
+  - id: 3
+    nombre: Ricardo Valencia
+    documento: "1000000003"
+    partido: Coalición Gamma
+    fotoUrl: ""
+
+puntos:
+  - id: 1
+    nombre: Puesto Avenida Chile
+    latitud: 4.6486
+    longitud: -74.0764
+    activo: true
+    secreto: "<jwt-del-punto-generado-por-el-servidor-electoral>"
+    jurados:
+      - id: 1
+        nombre: Juliana Pérez
+        documento: "2000000001"
+        usuario: jperez
+        hash: "$argon2id$..."
+    terminales:
+      - id: 1
+        secreto: "<jwt-de-terminal-1>"
+        clavePublica: "302a300506032b6570032100abcdef..."
+        activo: true
+        votantes:
+          - id: 101
+            nombre: Andrés Mora
+            documento: "1010101010"
+          - id: 102
+            nombre: Sara Beltrán
+            documento: "1020202020"
+      - id: 2
+        secreto: "<jwt-de-terminal-2>"
+        clavePublica: "302a300506032b65700321001122aabb..."
+        activo: true
+        votantes:
+          - id: 201
+            nombre: Camilo Salinas
+            documento: "1030303030"
+          - id: 202
+            nombre: Diana Rojas
+            documento: "1040404040"
