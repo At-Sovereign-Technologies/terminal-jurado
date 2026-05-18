@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+    Accessibility,
     AlertCircle,
     CheckCircle2,
     Loader2,
@@ -12,10 +13,13 @@ import { useContextoListo } from "../config/JuradoContext";
 import { crearNodoClient } from "../api/nodo.api";
 import { enviarHandshake, urlDeTerminal } from "../api/terminalVoto.api";
 import { subscribirseAEventosTerminal } from "../api/sidecarClient";
+import { registrarAsistencia } from "../api/asistencia.api";
 import type {
     DeploymentVotante,
     DeploymentTerminal,
 } from "../types/deployment";
+import type { DatosAsistencia } from "../types/asistencia";
+import DialogoVotoAsistido from "./DialogoVotoAsistido";
 
 type EstadoTerminal = "LIBRE" | "OCUPADA" | "FUERA_DE_SERVICIO";
 
@@ -48,6 +52,13 @@ export default function JuradoApp() {
         tipo: "ok" | "error";
         texto: string;
     } | null>(null);
+
+    // SE-M3-05 — diálogo de voto asistido. Cuando hay valor, se muestra el
+    // modal para capturar al acompañante antes de autorizar la sesión.
+    const [sesionAsistida, setSesionAsistida] = useState<
+        | { votante: DeploymentVotante; terminalId: number }
+        | null
+    >(null);
 
     // Estado de cada terminal del punto: libre / ocupada / fuera de servicio.
     // Se inicializa según `activo`; los eventos del sidecar (VOTO_EMITIDO,
@@ -103,12 +114,18 @@ export default function JuradoApp() {
 
     const autorizarSesion = async (
         votante: DeploymentVotante,
-        terminalId: number
+        terminalId: number,
+        hashAsistencia?: string
     ) => {
         setMensaje(null);
         // sesionToken será un JWT firmado por el jurado cuando Augusto defina el
         // formato. Por ahora generamos un token de demo trazable.
-        const sesionToken = `jurado-demo-${Date.now()}-v${votante.id}-t${terminalId}`;
+        // Cuando hay voto asistido, anexamos el hash del acompañante para que
+        // el evento de auditoría en SR-M6 quede vinculado a la sesión.
+        const sufijoAsistido = hashAsistencia
+            ? `-asist${hashAsistencia.slice(0, 8)}`
+            : "";
+        const sesionToken = `jurado-demo-${Date.now()}-v${votante.id}-t${terminalId}${sufijoAsistido}`;
         const url = urlDeTerminal(terminalId);
 
         const r = await enviarHandshake(url, {
@@ -121,7 +138,7 @@ export default function JuradoApp() {
                 tipo: "error",
                 texto: `No se pudo enviar el handshake a la terminal ${terminalId}: ${r.error ?? "error desconocido"}.`,
             });
-            return;
+            return false;
         }
 
         setVistas((prev) =>
@@ -134,8 +151,39 @@ export default function JuradoApp() {
         setVotadoMap((m) => ({ ...m, [votante.documento]: true }));
         setMensaje({
             tipo: "ok",
-            texto: `Sesión autorizada para ${votante.nombre} en la terminal ${terminalId}.`,
+            texto: hashAsistencia
+                ? `Sesión asistida autorizada para ${votante.nombre} en la terminal ${terminalId}.`
+                : `Sesión autorizada para ${votante.nombre} en la terminal ${terminalId}.`,
         });
+        return true;
+    };
+
+    // SE-M3-05: registra al acompañante en SR-M6 (mock) y luego dispara el
+    // handshake. Si el acompañante excede el límite legal, NO se autoriza.
+    const confirmarVotoAsistido = async (
+        datos: DatosAsistencia
+    ): Promise<void> => {
+        if (!sesionAsistida) return;
+        const { votante, terminalId } = sesionAsistida;
+
+        const r = await registrarAsistencia(datos);
+        if (!r.ok) {
+            setMensaje({
+                tipo: "error",
+                texto: r.motivoRechazo ?? "No se pudo registrar la asistencia.",
+            });
+            setSesionAsistida(null);
+            return;
+        }
+
+        const okHandshake = await autorizarSesion(
+            votante,
+            terminalId,
+            r.hashAcompanante
+        );
+        if (okHandshake) {
+            setSesionAsistida(null);
+        }
     };
 
     return (
@@ -195,6 +243,12 @@ export default function JuradoApp() {
                                     )}
                                     onAutorizar={(terminalId) =>
                                         autorizarSesion(v, terminalId)
+                                    }
+                                    onAutorizarAsistido={(terminalId) =>
+                                        setSesionAsistida({
+                                            votante: v,
+                                            terminalId,
+                                        })
                                     }
                                 />
                             ))}
@@ -259,6 +313,14 @@ export default function JuradoApp() {
                     </div>
                 )}
             </main>
+
+            {sesionAsistida && (
+                <DialogoVotoAsistido
+                    documentoVotante={sesionAsistida.votante.documento}
+                    onCerrar={() => setSesionAsistida(null)}
+                    onConfirmar={confirmarVotoAsistido}
+                />
+            )}
         </div>
     );
 }
@@ -270,6 +332,7 @@ function FilaVotante({
     onVerificar,
     terminalesLibres,
     onAutorizar,
+    onAutorizarAsistido,
 }: {
     votante: DeploymentVotante;
     votado: boolean | undefined;
@@ -277,8 +340,11 @@ function FilaVotante({
     onVerificar: () => void;
     terminalesLibres: VistaTerminal[];
     onAutorizar: (terminalId: number) => void;
+    onAutorizarAsistido: (terminalId: number) => void;
 }) {
-    const [mostrarTerminales, setMostrarTerminales] = useState(false);
+    const [modoSeleccion, setModoSeleccion] = useState<
+        null | "normal" | "asistido"
+    >(null);
     const yaVoto = votado === true;
 
     return (
@@ -316,19 +382,42 @@ function FilaVotante({
                         </span>
                     )}
                     {votado === false && (
-                        <button
-                            onClick={() => setMostrarTerminales((v) => !v)}
-                            className="flex items-center gap-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
-                        >
-                            <UserCheck size={12} />
-                            Autorizar
-                        </button>
+                        <>
+                            <button
+                                onClick={() =>
+                                    setModoSeleccion((m) =>
+                                        m === "normal" ? null : "normal"
+                                    )
+                                }
+                                className="flex items-center gap-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
+                            >
+                                <UserCheck size={12} />
+                                Autorizar
+                            </button>
+                            <button
+                                onClick={() =>
+                                    setModoSeleccion((m) =>
+                                        m === "asistido" ? null : "asistido"
+                                    )
+                                }
+                                className="flex items-center gap-1 border border-red-300 bg-white hover:bg-red-50 text-red-600 text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
+                                title="Voto asistido (SE-M3-05)"
+                            >
+                                <Accessibility size={12} />
+                                Asistido
+                            </button>
+                        </>
                     )}
                 </div>
             </div>
 
-            {mostrarTerminales && votado === false && (
-                <div className="mt-2 flex flex-wrap gap-2">
+            {modoSeleccion && votado === false && (
+                <div className="mt-2 flex flex-wrap gap-2 items-center">
+                    <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider">
+                        {modoSeleccion === "asistido"
+                            ? "Asistido → terminal:"
+                            : "Terminal:"}
+                    </span>
                     {terminalesLibres.length === 0 && (
                         <span className="text-xs text-gray-400 italic">
                             No hay terminales libres en este momento.
@@ -338,10 +427,18 @@ function FilaVotante({
                         <button
                             key={v.terminal.id}
                             onClick={() => {
-                                onAutorizar(v.terminal.id);
-                                setMostrarTerminales(false);
+                                if (modoSeleccion === "asistido") {
+                                    onAutorizarAsistido(v.terminal.id);
+                                } else {
+                                    onAutorizar(v.terminal.id);
+                                }
+                                setModoSeleccion(null);
                             }}
-                            className="text-xs border border-green-300 bg-green-50 hover:bg-green-100 text-green-700 font-semibold px-3 py-1 rounded-lg"
+                            className={`text-xs border font-semibold px-3 py-1 rounded-lg ${
+                                modoSeleccion === "asistido"
+                                    ? "border-red-300 bg-red-50 hover:bg-red-100 text-red-700"
+                                    : "border-green-300 bg-green-50 hover:bg-green-100 text-green-700"
+                            }`}
                         >
                             → Terminal #{v.terminal.id}
                         </button>
