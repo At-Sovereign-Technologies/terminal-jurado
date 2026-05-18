@@ -40,9 +40,22 @@ export default function JuradoApp() {
         [config]
     );
 
-    // Aggregamos todos los votantes del punto desde todas las terminales.
-    const todosVotantes = useMemo<DeploymentVotante[]>(() => {
-        return punto.terminales.flatMap((t) => t.votantes);
+    // Aggregamos todos los votantes del punto + a qué terminal está asignado
+    // cada uno. El jurado solo puede enviar al votante a SU terminal asignada
+    // (las terminales no comparten su lista de votantes asignados).
+    const todosVotantes = useMemo<
+        Array<{ votante: DeploymentVotante; terminalAsignadaId: number }>
+    >(() => {
+        const flat: Array<{
+            votante: DeploymentVotante;
+            terminalAsignadaId: number;
+        }> = [];
+        for (const t of punto.terminales) {
+            for (const v of t.votantes) {
+                flat.push({ votante: v, terminalAsignadaId: t.id });
+            }
+        }
+        return flat;
     }, [punto]);
 
     const [busqueda, setBusqueda] = useState("");
@@ -91,7 +104,7 @@ export default function JuradoApp() {
         const q = busqueda.trim().toLowerCase();
         if (!q) return todosVotantes;
         return todosVotantes.filter(
-            (v) =>
+            ({ votante: v }) =>
                 v.documento.toLowerCase().includes(q) ||
                 v.nombre.toLowerCase().includes(q)
         );
@@ -229,29 +242,50 @@ export default function JuradoApp() {
                         </p>
 
                         <ul className="divide-y border rounded-xl overflow-hidden">
-                            {votantesFiltrados.map((v) => (
-                                <FilaVotante
-                                    key={v.id}
-                                    votante={v}
-                                    votado={votadoMap[v.documento]}
-                                    verificando={verificando === v.documento}
-                                    onVerificar={() =>
-                                        verificarVotante(v.documento)
-                                    }
-                                    terminalesLibres={vistas.filter(
-                                        (x) => x.estado === "LIBRE"
-                                    )}
-                                    onAutorizar={(terminalId) =>
-                                        autorizarSesion(v, terminalId)
-                                    }
-                                    onAutorizarAsistido={(terminalId) =>
-                                        setSesionAsistida({
-                                            votante: v,
-                                            terminalId,
-                                        })
-                                    }
-                                />
-                            ))}
+                            {votantesFiltrados.map(
+                                ({ votante: v, terminalAsignadaId }) => {
+                                    // El votante solo puede ir a su terminal
+                                    // asignada (el deployment.yml define qué
+                                    // terminal contiene a cada votante).
+                                    const terminalAsignada = vistas.find(
+                                        (x) => x.terminal.id === terminalAsignadaId
+                                    );
+                                    const terminalDisponible =
+                                        terminalAsignada?.estado === "LIBRE"
+                                            ? [terminalAsignada]
+                                            : [];
+                                    return (
+                                        <FilaVotante
+                                            key={v.id}
+                                            votante={v}
+                                            terminalAsignadaId={terminalAsignadaId}
+                                            terminalAsignadaEstado={
+                                                terminalAsignada?.estado ??
+                                                "FUERA_DE_SERVICIO"
+                                            }
+                                            votado={votadoMap[v.documento]}
+                                            verificando={
+                                                verificando === v.documento
+                                            }
+                                            onVerificar={() =>
+                                                verificarVotante(v.documento)
+                                            }
+                                            terminalesDisponibles={
+                                                terminalDisponible
+                                            }
+                                            onAutorizar={(terminalId) =>
+                                                autorizarSesion(v, terminalId)
+                                            }
+                                            onAutorizarAsistido={(terminalId) =>
+                                                setSesionAsistida({
+                                                    votante: v,
+                                                    terminalId,
+                                                })
+                                            }
+                                        />
+                                    );
+                                }
+                            )}
                             {votantesFiltrados.length === 0 && (
                                 <li className="px-4 py-6 text-center text-sm text-gray-400">
                                     Sin votantes para "{busqueda}".
@@ -327,18 +361,22 @@ export default function JuradoApp() {
 
 function FilaVotante({
     votante,
+    terminalAsignadaId,
+    terminalAsignadaEstado,
     votado,
     verificando,
     onVerificar,
-    terminalesLibres,
+    terminalesDisponibles,
     onAutorizar,
     onAutorizarAsistido,
 }: {
     votante: DeploymentVotante;
+    terminalAsignadaId: number;
+    terminalAsignadaEstado: EstadoTerminal;
     votado: boolean | undefined;
     verificando: boolean;
     onVerificar: () => void;
-    terminalesLibres: VistaTerminal[];
+    terminalesDisponibles: VistaTerminal[];
     onAutorizar: (terminalId: number) => void;
     onAutorizarAsistido: (terminalId: number) => void;
 }) {
@@ -346,6 +384,7 @@ function FilaVotante({
         null | "normal" | "asistido"
     >(null);
     const yaVoto = votado === true;
+    const terminalNoDisponible = terminalAsignadaEstado !== "LIBRE";
 
     return (
         <li className="px-4 py-3">
@@ -355,7 +394,10 @@ function FilaVotante({
                         {votante.nombre}
                     </p>
                     <p className="text-xs font-mono text-gray-500">
-                        Doc {votante.documento}
+                        Doc {votante.documento}{" "}
+                        <span className="ml-2 px-1.5 py-0.5 rounded bg-gray-100 text-[10px] font-bold uppercase tracking-wider text-gray-600">
+                            Terminal #{terminalAsignadaId}
+                        </span>
                     </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -383,29 +425,41 @@ function FilaVotante({
                     )}
                     {votado === false && (
                         <>
-                            <button
-                                onClick={() =>
-                                    setModoSeleccion((m) =>
-                                        m === "normal" ? null : "normal"
-                                    )
-                                }
-                                className="flex items-center gap-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
-                            >
-                                <UserCheck size={12} />
-                                Autorizar
-                            </button>
-                            <button
-                                onClick={() =>
-                                    setModoSeleccion((m) =>
-                                        m === "asistido" ? null : "asistido"
-                                    )
-                                }
-                                className="flex items-center gap-1 border border-red-300 bg-white hover:bg-red-50 text-red-600 text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
-                                title="Voto asistido (SE-M3-05)"
-                            >
-                                <Accessibility size={12} />
-                                Asistido
-                            </button>
+                            {terminalNoDisponible ? (
+                                <span className="text-[11px] text-gray-400 italic">
+                                    {terminalAsignadaEstado === "OCUPADA"
+                                        ? "Terminal ocupada"
+                                        : "Terminal fuera de servicio"}
+                                </span>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={() =>
+                                            setModoSeleccion((m) =>
+                                                m === "normal" ? null : "normal"
+                                            )
+                                        }
+                                        className="flex items-center gap-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
+                                    >
+                                        <UserCheck size={12} />
+                                        Autorizar
+                                    </button>
+                                    <button
+                                        onClick={() =>
+                                            setModoSeleccion((m) =>
+                                                m === "asistido"
+                                                    ? null
+                                                    : "asistido"
+                                            )
+                                        }
+                                        className="flex items-center gap-1 border border-red-300 bg-white hover:bg-red-50 text-red-600 text-xs font-bold uppercase tracking-wide px-3 py-1.5 rounded-lg"
+                                        title="Voto asistido (SE-M3-05)"
+                                    >
+                                        <Accessibility size={12} />
+                                        Asistido
+                                    </button>
+                                </>
+                            )}
                         </>
                     )}
                 </div>
@@ -415,15 +469,15 @@ function FilaVotante({
                 <div className="mt-2 flex flex-wrap gap-2 items-center">
                     <span className="text-[11px] text-gray-500 font-semibold uppercase tracking-wider">
                         {modoSeleccion === "asistido"
-                            ? "Asistido → terminal:"
-                            : "Terminal:"}
+                            ? "Confirmar asistido →"
+                            : "Confirmar →"}
                     </span>
-                    {terminalesLibres.length === 0 && (
+                    {terminalesDisponibles.length === 0 && (
                         <span className="text-xs text-gray-400 italic">
-                            No hay terminales libres en este momento.
+                            Terminal asignada no disponible.
                         </span>
                     )}
-                    {terminalesLibres.map((v) => (
+                    {terminalesDisponibles.map((v) => (
                         <button
                             key={v.terminal.id}
                             onClick={() => {

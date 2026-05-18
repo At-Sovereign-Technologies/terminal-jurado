@@ -22,6 +22,12 @@ candidatos:
     partido: Coalición Gamma
     fotoUrl: ""
 
+# NOTA DEMO: en producción cada terminal del puesto es una máquina física
+# distinta con su propia IP/DNS. En esta demo solo levantamos UN sidecar
+# (Terminal #1, puerto 8090), así que todos los votantes están asignados
+# a esa terminal. Para probar Terminal #2 en demo se necesitaría arrancar
+# un segundo SPA en puerto 5174 con sidecar en :8092.
+
 puntos:
   - id: 1
     nombre: Puesto Avenida Chile
@@ -47,14 +53,17 @@ puntos:
           - id: 102
             nombre: Sara Beltrán
             documento: "1020202020"
+          - id: 103
+            nombre: Camilo Salinas
+            documento: "1030303030"
+          - id: 104
+            nombre: Diana Rojas
+            documento: "1040404040"
       - id: 2
         secreto: "<jwt-de-terminal-2>"
         clavePublica: "302a300506032b65700321001122aabb..."
-        activo: true
-        votantes:
-          - id: 201
-            nombre: Camilo Salinas
-            documento: "1030303030"
-          - id: 202
-            nombre: Diana Rojas
-            documento: "1040404040"
+        # Marcar `activo: false` en demo si solo tienes un sidecar corriendo.
+        # Así la UI del jurado la muestra como FUERA DE SERVICIO en vez de
+        # dejarte intentar autorizar sesiones que fallarán con Network Error.
+        activo: false
+        votantes: []
