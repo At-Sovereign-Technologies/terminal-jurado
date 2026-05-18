@@ -12,9 +12,8 @@ import {
 import { useContextoListo } from "../config/JuradoContext";
 import { crearNodoClient } from "../api/nodo.api";
 import { enviarHandshake } from "../api/terminalVoto.api";
-import { subscribirseAEventosTerminal } from "../api/sidecarClient";
+import { subscribirseSidecar } from "../api/sidecarClient";
 import { registrarAsistencia } from "../api/asistencia.api";
-import { usePollingRevocacion } from "../config/usePollingRevocacion";
 import type {
     DeploymentVotante,
     DeploymentTerminal,
@@ -74,40 +73,9 @@ export default function JuradoApp() {
         | null
     >(null);
 
-    // Polling: si el Servidor Electoral revoca el punto entero en caliente,
-    // bloqueamos la mesa del jurado. Si revoca terminales individuales, las
-    // marcamos como FUERA_DE_SERVICIO sin interrumpir al jurado.
+    // Estado en vivo del sidecar (revocaciones + cola offline).
     const [puntoRevocado, setPuntoRevocado] = useState<string | null>(null);
-
-    usePollingRevocacion({
-        clusterUrl: config.clusterUrl,
-        secreto: config.secreto,
-        puntoId: punto.id,
-        onPuntoRevocado: (motivo) => setPuntoRevocado(motivo),
-        onTerminalesActualizadas: (terminalesRemotas) => {
-            setVistas((prev) =>
-                prev.map((v) => {
-                    const remota = terminalesRemotas.find(
-                        (x) => x.id === v.terminal.id
-                    );
-                    if (!remota) return v;
-                    // Si el Servidor Electoral revoca esta terminal, la
-                    // forzamos a FUERA_DE_SERVICIO. Si la reactiva y ya estaba
-                    // libre, no hacemos nada (no degradamos OCUPADA → LIBRE
-                    // sin que llegue el evento real del sidecar).
-                    if (!remota.activo) {
-                        return v.estado === "FUERA_DE_SERVICIO"
-                            ? v
-                            : { ...v, estado: "FUERA_DE_SERVICIO" };
-                    }
-                    if (v.estado === "FUERA_DE_SERVICIO") {
-                        return { ...v, estado: "LIBRE" };
-                    }
-                    return v;
-                })
-            );
-        },
-    });
+    const [colaPendiente, setColaPendiente] = useState<number>(0);
 
     // Estado de cada terminal del punto: libre / ocupada / fuera de servicio.
     // Se inicializa según `activo`; los eventos del sidecar (VOTO_EMITIDO,
@@ -120,18 +88,42 @@ export default function JuradoApp() {
     );
 
     useEffect(() => {
-        const sub = subscribirseAEventosTerminal((ev) => {
-            setVistas((prev) =>
-                prev.map((v) =>
-                    v.terminal.id === ev.terminalId
-                        ? { ...v, estado: "LIBRE", votanteActualId: undefined }
-                        : v
-                )
-            );
-            setMensaje({
-                tipo: "ok",
-                texto: `Terminal ${ev.terminalId}: ${ev.tipo === "VOTO_EMITIDO" ? "voto emitido" : "sesión cancelada"}.`,
-            });
+        const sub = subscribirseSidecar({
+            onEventoTerminal: (ev) => {
+                setVistas((prev) =>
+                    prev.map((v) =>
+                        v.terminal.id === ev.terminalId
+                            ? {
+                                  ...v,
+                                  estado: "LIBRE",
+                                  votanteActualId: undefined,
+                              }
+                            : v
+                    )
+                );
+                setMensaje({
+                    tipo: "ok",
+                    texto: `Terminal ${ev.terminalId}: ${ev.tipo === "VOTO_EMITIDO" ? "voto emitido" : "sesión cancelada"}.`,
+                });
+            },
+            onColaActualizada: (pendientes) => setColaPendiente(pendientes),
+            onPuntoRevocado: () =>
+                setPuntoRevocado(
+                    "El Servidor Electoral revocó este punto de votación."
+                ),
+            onTerminalRevocada: (terminalId) => {
+                setVistas((prev) =>
+                    prev.map((v) =>
+                        v.terminal.id === terminalId
+                            ? { ...v, estado: "FUERA_DE_SERVICIO" }
+                            : v
+                    )
+                );
+                setMensaje({
+                    tipo: "error",
+                    texto: `Terminal #${terminalId} revocada por el Servidor Electoral.`,
+                });
+            },
         });
         return () => sub.cerrar();
     }, []);
@@ -271,11 +263,24 @@ export default function JuradoApp() {
                         </p>
                     </div>
                 </div>
-                <div className="text-right">
-                    <p className="text-xs text-gray-400 uppercase tracking-wider">
-                        Punto
-                    </p>
-                    <p className="text-sm font-mono">#{punto.id}</p>
+                <div className="flex items-center gap-4">
+                    {colaPendiente > 0 && (
+                        <div
+                            className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5"
+                            title="Votos guardados localmente porque el Nodo de Votación Activa no responde. Se reenviarán automáticamente."
+                        >
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                            <span className="text-xs font-bold text-amber-700">
+                                {colaPendiente} {colaPendiente === 1 ? "voto" : "votos"} en cola offline
+                            </span>
+                        </div>
+                    )}
+                    <div className="text-right">
+                        <p className="text-xs text-gray-400 uppercase tracking-wider">
+                            Punto
+                        </p>
+                        <p className="text-sm font-mono">#{punto.id}</p>
+                    </div>
                 </div>
             </header>
 

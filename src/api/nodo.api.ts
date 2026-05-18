@@ -1,47 +1,26 @@
-// Cliente HTTP del Nodo de Votación Activa, desde la Terminal de Jurado.
+// Cliente del sidecar local para consultas que el sidecar proxea al Nodo
+// de Votación Activa. El SPA NO habla directo con el Nodo: todo va por el
+// sidecar para mantener una sola fuente de salida al exterior.
 
-import axios, { type AxiosInstance } from "axios";
+import axios from "axios";
 import type { RespuestaVotanteIdentidad } from "../types/voto";
+
+const SIDECAR_URL =
+    (
+        import.meta.env as unknown as { VITE_SIDECAR_URL?: string }
+    ).VITE_SIDECAR_URL?.trim() || "http://localhost:8089";
 
 export interface NodoClient {
     consultarVotante(documento: string): Promise<RespuestaVotanteIdentidad>;
-    consultarEstadoPuesto(): Promise<EstadoPuestoRespuesta>;
 }
 
-// Respuesta de GET /puesto. Solo nos importan los flags `activo` para
-// el polling de revocación. Las terminales devueltas también permiten
-// detectar si una máquina del punto fue marcada como inactiva.
-export interface EstadoPuestoRespuesta {
-    punto: {
-        id: number;
-        activo: boolean;
-        terminales: Array<{ id: number; activo: boolean }>;
-    };
-}
-
-export function crearNodoClient(opts: {
-    clusterUrl: string;
-    secreto: string;
-}): NodoClient {
-    const http: AxiosInstance = axios.create({
-        baseURL: opts.clusterUrl.replace(/\/$/, ""),
-        timeout: 5000,
-        headers: {
-            Authorization: `Bearer ${opts.secreto}`,
-            "Content-Type": "application/json",
-        },
-    });
-
+export function crearNodoClient(_opts?: unknown): NodoClient {
     return {
         async consultarVotante(documento) {
-            const r = await http.get<RespuestaVotanteIdentidad>(
-                `/votante/${encodeURIComponent(documento)}`
+            const r = await axios.get<RespuestaVotanteIdentidad>(
+                `${SIDECAR_URL.replace(/\/$/, "")}/votante/${encodeURIComponent(documento)}`,
+                { timeout: 4000 }
             );
-            return r.data;
-        },
-
-        async consultarEstadoPuesto() {
-            const r = await http.get<EstadoPuestoRespuesta>("/puesto");
             return r.data;
         },
     };

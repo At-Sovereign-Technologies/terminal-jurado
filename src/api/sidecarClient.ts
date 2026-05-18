@@ -1,7 +1,10 @@
-// Cliente del sidecar de la Terminal de Jurado.
-// El sidecar escucha en :8089 (HTTP) y :8087 (WebSocket) y recibe eventos
-// que las Terminales de Voto le mandan vía `parent_url` cuando un votante
-// termina su sesión (VOTO_EMITIDO o SESION_CANCELADA).
+// Cliente del WebSocket de eventos del sidecar de la Terminal de Jurado.
+// El sidecar emite varios tipos de mensajes en vivo al SPA:
+//   - EVENTO_TERMINAL  : voto emitido o sesión cancelada en una terminal.
+//   - COLA_ACTUALIZADA : cambió el número de votos pendientes en la cola offline.
+//   - PUNTO_REVOCADO   : el Servidor Electoral revocó el punto entero.
+//   - TERMINAL_REVOCADA: una terminal específica fue revocada en caliente.
+//   - WELCOME          : sidecar acaba de conectar; trae colaPendiente.
 
 import type { EventoTerminalVoto } from "../types/voto";
 
@@ -14,23 +17,50 @@ const WS_URL =
 interface MensajeWelcome {
     tipo: "WELCOME";
     mensaje?: string;
+    colaPendiente?: number;
 }
 
-interface MensajeEvento {
+interface MensajeEventoTerminal {
     tipo: "EVENTO_TERMINAL";
     terminalId: number;
     votanteId?: number;
     eventoTipo: EventoTerminalVoto["tipo"];
 }
 
-type Mensaje = MensajeWelcome | MensajeEvento;
+interface MensajeColaActualizada {
+    tipo: "COLA_ACTUALIZADA";
+    pendientes: number;
+}
+
+interface MensajePuntoRevocado {
+    tipo: "PUNTO_REVOCADO";
+}
+
+interface MensajeTerminalRevocada {
+    tipo: "TERMINAL_REVOCADA";
+    terminalId: number;
+}
+
+type Mensaje =
+    | MensajeWelcome
+    | MensajeEventoTerminal
+    | MensajeColaActualizada
+    | MensajePuntoRevocado
+    | MensajeTerminalRevocada;
+
+export interface ManejadoresSidecar {
+    onEventoTerminal?: (e: EventoTerminalVoto) => void;
+    onColaActualizada?: (pendientes: number) => void;
+    onPuntoRevocado?: () => void;
+    onTerminalRevocada?: (terminalId: number) => void;
+}
 
 export interface SuscripcionSidecar {
     cerrar: () => void;
 }
 
-export function subscribirseAEventosTerminal(
-    onEvento: (e: EventoTerminalVoto) => void
+export function subscribirseSidecar(
+    manejadores: ManejadoresSidecar
 ): SuscripcionSidecar {
     let ws: WebSocket | null = null;
     let reintento: ReturnType<typeof setTimeout> | null = null;
@@ -48,15 +78,34 @@ export function subscribirseAEventosTerminal(
         ws.addEventListener("message", (ev) => {
             try {
                 const msg = JSON.parse(String(ev.data)) as Mensaje;
-                if (msg.tipo === "EVENTO_TERMINAL") {
-                    onEvento({
-                        tipo: msg.eventoTipo,
-                        terminalId: msg.terminalId,
-                        votanteId: msg.votanteId,
-                    });
+                switch (msg.tipo) {
+                    case "WELCOME":
+                        if (
+                            typeof msg.colaPendiente === "number" &&
+                            manejadores.onColaActualizada
+                        ) {
+                            manejadores.onColaActualizada(msg.colaPendiente);
+                        }
+                        break;
+                    case "EVENTO_TERMINAL":
+                        manejadores.onEventoTerminal?.({
+                            tipo: msg.eventoTipo,
+                            terminalId: msg.terminalId,
+                            votanteId: msg.votanteId,
+                        });
+                        break;
+                    case "COLA_ACTUALIZADA":
+                        manejadores.onColaActualizada?.(msg.pendientes);
+                        break;
+                    case "PUNTO_REVOCADO":
+                        manejadores.onPuntoRevocado?.();
+                        break;
+                    case "TERMINAL_REVOCADA":
+                        manejadores.onTerminalRevocada?.(msg.terminalId);
+                        break;
                 }
             } catch {
-                /* ignorar */
+                /* ignorar mensajes mal formados */
             }
         });
 
@@ -82,4 +131,11 @@ export function subscribirseAEventosTerminal(
             ws?.close();
         },
     };
+}
+
+// Alias retro-compatible para el código existente.
+export function subscribirseAEventosTerminal(
+    onEvento: (e: EventoTerminalVoto) => void
+): SuscripcionSidecar {
+    return subscribirseSidecar({ onEventoTerminal: onEvento });
 }
