@@ -1,33 +1,37 @@
-// Cliente HTTP para enviar handshakes a las Terminales de Voto del mismo punto.
+// Cliente HTTP para empujar handshakes a las Terminales de Voto.
 //
-// Cada Terminal de Voto corre un sidecar (Express + ws) en :8090. El jurado
-// le hace POST /handshake con { votanteId, sesionToken } y la terminal entra
-// en sesión.
+// El SPA del Jurado llama al SU PROPIO sidecar (http://localhost:8089) y
+// le indica a qué Terminal Voto dirigirlo. El sidecar mantiene los
+// WebSockets persistentes con cada Terminal Voto del puesto y se encarga
+// de empujar el HANDSHAKE por el canal correcto.
 //
-// EN DEV: todas las Terminales de Voto del puesto pueden estar corriendo en
-// localhost con puertos distintos. En `terminales` del deployment.yml cada
-// terminal tiene una URL local asignada para esto (TODO: extender el
-// deployment.yml con `urlLocal` o similar; por ahora derivamos del id).
-//
-// EN PROD: el DNS interno del puesto resuelve cada terminal a su IP local.
+// Configurable vía VITE_SIDECAR_URL para producción.
 
 import axios from "axios";
 import type { HandshakePayload } from "../types/voto";
 
+const SIDECAR_URL =
+    (
+        import.meta.env as unknown as { VITE_SIDECAR_URL?: string }
+    ).VITE_SIDECAR_URL?.trim() || "http://localhost:8089";
+
 export interface ResultadoHandshake {
     ok: boolean;
-    entregadoA?: number;
     error?: string;
 }
 
 export async function enviarHandshake(
-    terminalUrl: string,
+    terminalId: number,
     payload: HandshakePayload
 ): Promise<ResultadoHandshake> {
     try {
         const r = await axios.post(
-            `${terminalUrl.replace(/\/$/, "")}/handshake`,
-            payload,
+            `${SIDECAR_URL.replace(/\/$/, "")}/handshake`,
+            {
+                terminalId,
+                votanteId: payload.votanteId,
+                sesionToken: payload.sesionToken,
+            },
             {
                 timeout: 3000,
                 headers: { "Content-Type": "application/json" },
@@ -36,22 +40,11 @@ export async function enviarHandshake(
         return r.data as ResultadoHandshake;
     } catch (e) {
         const msg =
-            e instanceof Error
-                ? e.message
-                : "Error desconocido enviando handshake.";
+            axios.isAxiosError(e) && e.response?.data?.error
+                ? e.response.data.error
+                : e instanceof Error
+                  ? e.message
+                  : "Error desconocido enviando handshake.";
         return { ok: false, error: msg };
     }
-}
-
-// Mapeo dev: terminalId -> URL local del sidecar de esa terminal.
-// En prod este mapeo viene del DNS o del deployment.yml. Por ahora hardcoded
-// para arrancar las 3 terminales del ejemplo en puertos consecutivos.
-export function urlDeTerminal(terminalId: number): string {
-    const env = (
-        import.meta.env as unknown as { VITE_TERMINAL_BASE?: string }
-    ).VITE_TERMINAL_BASE;
-    const base = env?.trim() || "http://localhost";
-    // Por convención dev: terminal 1 -> 8090, terminal 2 -> 8092, etc.
-    const puerto = 8088 + terminalId * 2;
-    return `${base}:${puerto}`;
 }

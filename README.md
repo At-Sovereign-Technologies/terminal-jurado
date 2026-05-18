@@ -1,58 +1,71 @@
 # Terminal de Jurado — Sello Legítimo
 
-SPA web para la **Terminal de Jurado** (TJ) de un puesto electoral, dentro
-del sub-sistema **Sistema Electoral (SE)**.
+SPA web + sidecar Node para la **Terminal de Jurado** (TJ) de un puesto
+electoral, dentro del sub-sistema **Sistema Electoral (SE)**.
 
-Es la consola del jurado en cada puesto. Identifica al votante, verifica
-contra el Nodo que no haya votado, selecciona la Terminal de Voto asignada
-y le envía un handshake para iniciar la sesión.
+Es la consola del jurado en cada puesto. A diferencia de la Terminal Voto
+(que es solo cliente), la Terminal Jurado **escucha conexiones de las
+Terminales Voto del puesto y las delega al Nodo de Votación Activa**.
 
 ## Arquitectura
 
 ```
-┌─────────────────────┐
-│  Servidor Electoral │ ──▶ genera deployment.yml + jurado-config.json
-└─────────────────────┘
-                       ↓
-                ┌──────────────────────┐
-                │   Terminal Jurado    │
-                │   (este SPA)         │
-                └──┬──────────┬────────┘
-                   │          │ POST /handshake
-                   │          │  (autorizar sesión)
-                   │          ↓
-                   │      ┌────────────────────┐
-                   │      │  Terminal Voto     │
-                   │      │  (mismo puesto)    │
-                   │      └─────┬──────────────┘
-                   │            │ POST /eventos
-                   │            │   (VOTO_EMITIDO)
-                   │            ↓
-                   │      ┌────────────────────────────────┐
-                   │      │ Sidecar Jurado (Express + ws)  │
-                   │      │ :8089 HTTP   :8087 WebSocket   │
-                   │      └────────────┬───────────────────┘
-                   │                   │ WS push
-                   │                   ↓
-                   │           [el SPA libera la terminal]
-                   ↓
-              GET /votante/{doc}     (verificar si ya votó)
-              GET /puesto            (polling revocación cada 30s)
-              al Nodo de Votación Activa
+        ┌─────────────────────┐
+        │  Servidor Electoral │ ──▶ deployment.yml + jurado-config.json
+        └─────────────────────┘
+                              ↓
+        ┌──────────────────────────────────────────────────┐
+        │  Máquina del Jurado                              │
+        │                                                  │
+        │  ┌──────────────────┐   ┌────────────────────┐   │
+        │  │  SPA (browser)   │←──│  Sidecar Node      │   │
+        │  │  - lista votantes│   │  - WS :8090 (Voto) │   │
+        │  │  - autoriza      │   │  - WS :8087 (SPA)  │   │
+        │  │  - voto asistido │   │  - HTTP :8089      │   │
+        │  └──────────────────┘   │  - cola.json       │   │
+        │                          │  - retry al Nodo   │   │
+        │                          └─────────┬──────────┘   │
+        └─────────────────────────────────────│─────────────┘
+                                              │ POST /votar (HTTP)
+                                              ↓
+                                ┌──────────────────────────┐
+                                │ Nodo de Votación Activa  │
+                                └──────────────────────────┘
+
+                          ↑ WebSocket persistente
+                          │ HANDSHAKE / VOTO
+        ┌─────────────────────────┐
+        │  Terminales de Voto     │
+        │  (clientes WS puros)    │
+        └─────────────────────────┘
 ```
+
+### Por qué hay sidecar Node aquí pero no en Voto
+
+El Jurado **escucha conexiones de las Terminales Voto del puesto**. Como un
+browser no puede recibir conexiones entrantes, el sidecar Node hace ese rol:
+
+- **Acepta WebSockets** de las Terminales Voto (puerto 8090).
+- **Reenvía votos** al Nodo de Votación Activa por HTTP.
+- **Guarda en cola local** (`sidecar/cola.json`) cuando el Nodo está caído.
+- **Reintenta cada 10 s** hasta drenar la cola.
+- **Notifica al SPA del Jurado** por otro WebSocket (puerto 8087) de eventos
+  en vivo (voto emitido, cola pendiente).
+
+La Terminal Voto, en cambio, es 100% cliente: solo abre WebSockets, no
+acepta nada. Por eso esa no necesita sidecar.
 
 ## Stack
 
-- Vite + React 18 + TypeScript
-- Tailwind CSS 3
-- `axios` para HTTP al Nodo y a las Terminales de Voto
+- Vite + React 18 + TypeScript (SPA)
+- Tailwind CSS 3 (estilos)
+- `axios` para HTTP del SPA al sidecar
 - `yaml` para parsear `deployment.yml`
-- Sidecar: Node + Express + ws + tsx
+- Sidecar: Node + Express + ws + tsx, sin librerías de cola (JSON simple)
 
 ## Configuración
 
-Dos archivos en `public/` generados por el Servidor Electoral antes de la
-jornada.
+Dos archivos en `public/` generados por el Servidor Electoral.
 
 ### `public/deployment.yml`
 Idéntico al de las Terminales de Voto.
@@ -68,58 +81,72 @@ Específico del jurado de **este puesto**:
 }
 ```
 
-## Desarrollo local
+> `clusterUrl` lo lee el SIDECAR vía variable de entorno `NODO_URL`. El SPA
+> no se conecta directo al Nodo; solo le habla al sidecar.
 
-### Opción A — SPA + sidecar (recomendado)
+## Desarrollo local
 
 ```bash
 npm install
 npm run dev:all
 ```
 
+Eso levanta:
+
 - **Vite** en `http://localhost:5180` — SPA del jurado.
-- **Sidecar** en `http://localhost:8089` (HTTP) + `ws://localhost:8087` (WS).
+- **Sidecar** en `:8089` (HTTP), `:8090` (WS Voto), `:8087` (WS Jurado).
 
-### Opción B — Solo SPA
-
-```bash
-npm run dev
-```
-
-Sin sidecar, los eventos `VOTO_EMITIDO` no llegan al SPA y las terminales
-quedan marcadas como ocupadas indefinidamente.
+Por defecto el sidecar intenta hablar con el Nodo en `http://localhost:8080`.
+Como el Nodo no existe todavía, todos los votos terminarán en `cola.json` y
+el sidecar reintentará cada 10 s.
 
 ### Probar flujo end-to-end (Jurado + Voto en paralelo)
 
 Necesitas **dos terminales abiertas**:
 
-1. **Terminal Voto** (`terminal-votacion`): `npm run dev:all` → Vite 5173, sidecar 8090.
-2. **Terminal Jurado** (este repo): `npm run dev:all` → Vite 5180, sidecar 8089.
+1. **Terminal Voto** (`terminal-votacion`, repo aparte): `npm run dev` → Vite 5173.
+2. **Terminal Jurado** (este repo): `npm run dev:all`.
 
 Abre `http://localhost:5173` (voto) y `http://localhost:5180` (jurado) en
 pestañas distintas.
 
 **Flujo de prueba:**
 
-1. En la Terminal Jurado verás la lista de votantes y las terminales del punto.
-2. Click "Verificar" en un votante → llama a `/votante/{doc}` del Nodo. Sin
-   Nodo real, asume "no votado".
-3. Click "Autorizar" → aparece botón con la terminal asignada del votante.
-4. Click "→ Terminal #N" → POST a `http://localhost:8090/handshake` (sidecar Voto).
-5. El SPA de la Terminal Voto salta de "espera" a "tarjetón".
-6. Marcas, confirmas. La Terminal Voto firma con Ed25519 y envía al Nodo.
-   Sin Nodo real falla en el envío pero la firma se computa.
-7. Para cerrar el ciclo, configura
-   `terminal-votacion/public/terminal-config.json` con
-   `"parentUrl": "http://localhost:8089"`. Cuando la Terminal Voto notifique
-   al Jurado, el sidecar del Jurado recibe `POST /eventos` y libera la
-   terminal.
+1. La Terminal Voto se conecta al sidecar (verás en la consola del sidecar
+   `[jurado-sidecar] HELLO de Terminal Voto #N`).
+2. En el SPA del Jurado, click "Verificar" en un votante → mock asume "no
+   votado" (no hay Nodo).
+3. Click "Autorizar" → click sobre la terminal asignada → el SPA hace POST
+   al sidecar (`localhost:8089/handshake`) → el sidecar empuja el HANDSHAKE
+   por WebSocket a la Terminal Voto.
+4. La Terminal Voto pasa a tarjetón inmediatamente.
+5. Marcas y confirmas. La Terminal Voto firma con Ed25519 y manda VOTO por
+   WS al sidecar.
+6. El sidecar reenvía al Nodo. Como no hay Nodo, lo encola en `cola.json` y
+   responde a la Voto con número de confirmación provisional (`VC-OFF-...`).
+7. La Voto muestra el comprobante; el SPA del Jurado libera la terminal
+   automáticamente.
+
+### Inspeccionar la cola offline
 
 ```bash
-# Simular VOTO_EMITIDO directamente al sidecar del jurado:
+cat sidecar/cola.json
+```
+
+Verás cada voto pendiente con su `intentos` (cuántas veces el sidecar trató
+de reenviarlo al Nodo). Cuando levantes un Nodo real, el sidecar drenará la
+cola sin intervención manual.
+
+### Atajos curl para tests manuales
+
+```bash
+# Liberar manualmente una terminal (simular voto emitido sin pasar por Voto):
 curl -X POST http://localhost:8089/eventos \
   -H "Content-Type: application/json" \
   -d '{"tipo":"VOTO_EMITIDO","terminalId":1,"votanteId":101}'
+
+# Estado del sidecar:
+curl http://localhost:8089/health
 ```
 
 ## Voto Asistido (SE-M3-05)
@@ -136,47 +163,33 @@ flujo:
    claro), valida el límite legal y, si pasa, envía el handshake con el
    hash del acompañante anexado al `sesionToken`.
 
-**Control de fraude**: el sistema rechaza si un mismo acompañante no
-familiar ya asistió a otro votante en la jornada (CA #3 de SE-M3-05). Los
-familiares no están sujetos a ese límite.
-
-## Revocación en caliente
-
-Cada 30 segundos el SPA llama a `GET /puesto` del Nodo. Dos efectos:
-
-1. Si el Servidor Electoral marcó este punto entero como inactivo, la mesa
-   se bloquea con "Mesa del Jurado revocada".
-2. Si cambia el flag `activo` de alguna terminal de voto del punto, su
-   tarjeta en la columna derecha se actualiza (LIBRE ↔ FUERA DE SERVICIO)
-   sin reinicio.
-
-Caídas temporales del Nodo no disparan revocación: solo se loguean.
+**Control de fraude**: rechaza si un mismo acompañante no familiar ya
+asistió a otro votante en la jornada (CA #3 de SE-M3-05). Los familiares
+no están sujetos a ese límite.
 
 ## Atributos de calidad
 
 - **Control de acceso** — el jurado consulta `votado` antes de autorizar.
   Si el votante ya votó, no se permite re-autorizar.
-- **Trazabilidad** — cada autorización genera un `sesionToken` único que la
-  Terminal de Voto vincula al voto en su evento de auditoría.
-- **Tolerancia a fraude** — terminales con `activo=false` aparecen "fuera de
-  servicio" y no se pueden seleccionar. Punto revocado bloquea toda la mesa.
+- **Trazabilidad** — cada autorización genera un `sesionToken` único; cada
+  voto recibido por el sidecar se loguea con `terminal` y `votante`; la
+  cola guarda intentos de retry.
+- **Resiliencia (offline-first)** — si el Nodo está caído, los votos se
+  encolan en disco (`sidecar/cola.json`) y el sidecar reintenta cada 10 s
+  hasta drenarlos. La jornada puede continuar sin Nodo.
 - **Privacidad del voto asistido** — los documentos del acompañante nunca
-  se persisten en claro; solo viaja el SHA-256 al registro de auditoría.
-- **Resiliencia** — sidecar con reconexión automática al WebSocket.
+  se persisten en claro; solo viaja el SHA-256 en el sesionToken.
 
 ## Pendientes
 
 - **Verificación del `sesionToken`.** Hoy generamos un token de demo
   trazable. Cuando el formato del JWT del jurado quede definido, firmarlo
   con la clave del punto y la Terminal Voto debe verificarlo.
-- **URL de las Terminales de Voto.** Hoy se deriva del id con
-  `urlDeTerminal()` (puerto = 8088 + id*2). En producción debe venir del
-  DNS interno del puesto o estar declarada en el `deployment.yml`.
 - **Endpoint real del transparency-service para asistencia.** Hoy
-  `registrarAsistencia` valida localmente en memoria. Cuando exista el
-  endpoint REST consultable desde la terminal, el adaptador hace POST con
-  el hash del acompañante.
+  `registrarAsistencia` valida localmente en memoria.
+- **Polling al Nodo para revocación en caliente.** Si el Servidor Electoral
+  marca el punto entero como inactivo, hay que enterarse sin reiniciar.
 - **Pruebas unitarias.** Sin tests todavía. Pendiente cobertura de:
+  - Cola offline del sidecar (encolar / drenar / persistir a JSON).
   - `registrarAsistencia` (límite no-familiar, exención de familiares).
-  - Hook de polling con timers fake.
-  - Sidecar (curl + recepción WebSocket).
+  - Multiplexor del sidecar (HELLO/VOTO/HANDSHAKE por WS).

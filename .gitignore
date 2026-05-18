@@ -23,5 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# SE-M3: archivos de configuración con secretos (no van en git)
 *.tsbuildinfo
+
+# Cola offline del sidecar (estado runtime, no se versiona)
+sidecar/cola.json

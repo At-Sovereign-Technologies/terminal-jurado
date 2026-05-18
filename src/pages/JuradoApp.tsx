@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useContextoListo } from "../config/JuradoContext";
 import { crearNodoClient } from "../api/nodo.api";
-import { enviarHandshake, urlDeTerminal } from "../api/terminalVoto.api";
+import { enviarHandshake } from "../api/terminalVoto.api";
 import { subscribirseAEventosTerminal } from "../api/sidecarClient";
 import { registrarAsistencia } from "../api/asistencia.api";
 import { usePollingRevocacion } from "../config/usePollingRevocacion";
@@ -175,9 +175,8 @@ export default function JuradoApp() {
             ? `-asist${hashAsistencia.slice(0, 8)}`
             : "";
         const sesionToken = `jurado-demo-${Date.now()}-v${votante.id}-t${terminalId}${sufijoAsistido}`;
-        const url = urlDeTerminal(terminalId);
 
-        const r = await enviarHandshake(url, {
+        const r = await enviarHandshake(terminalId, {
             votanteId: votante.id,
             sesionToken,
         });
