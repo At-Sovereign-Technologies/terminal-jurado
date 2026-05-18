@@ -1,5 +1,5 @@
 {
     "puntoId": 1,
-    "secreto": "PEGAR-AQUI-EL-JWT-DEL-PUNTO",
+    "secreto": "demo-punto-1-secret",
     "clusterUrl": "http://localhost:8080"
 }

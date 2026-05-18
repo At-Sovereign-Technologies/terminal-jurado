@@ -34,7 +34,7 @@ puntos:
     latitud: 4.6486
     longitud: -74.0764
     activo: true
-    secreto: "<jwt-del-punto-generado-por-el-servidor-electoral>"
+    secreto: "demo-punto-1-secret"
     jurados:
       - id: 1
         nombre: Juliana Pérez
@@ -43,8 +43,8 @@ puntos:
         hash: "$argon2id$..."
     terminales:
       - id: 1
-        secreto: "<jwt-de-terminal-1>"
-        clavePublica: "302a300506032b6570032100abcdef..."
+        secreto: "demo-terminal-1-secret"
+        clavePublica: "ac5eff87b69c511c6fbae77e127de867aca6756711ce15f0c8df0f42e911b14a"
         activo: true
         votantes:
           - id: 101
