@@ -646,6 +646,36 @@ app.get("/votante/:documento", async (req: Request, res: Response) => {
     }
 });
 
+// Proxy de configuración activa del puesto/electión desde el Nodo.
+// El SPA del Jurado la consume al arranque para evitar depender de
+// información quemada en archivos locales.
+app.get("/puesto", async (_req: Request, res: Response) => {
+    try {
+        const r = await fetch(`${NODO_URL.replace(/\/$/, "")}/puesto`, {
+            signal: AbortSignal.timeout(3000),
+        });
+        if (!r.ok) {
+            return res.status(r.status).json({
+                error: `No se pudo obtener /puesto del Nodo (HTTP ${r.status}).`,
+            });
+        }
+        const data = (await r.json().catch(() => null)) as unknown;
+        if (!data || typeof data !== "object") {
+            return res
+                .status(502)
+                .json({ error: "Respuesta inválida del Nodo para /puesto." });
+        }
+        return res.json(data);
+    } catch (e) {
+        return res.status(503).json({
+            error:
+                e instanceof Error
+                    ? e.message
+                    : "No se pudo contactar al Nodo para /puesto.",
+        });
+    }
+});
+
 app.get("/health", (_req, res) =>
     res.json({
         ok: true,
