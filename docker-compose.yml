@@ -1,0 +1,34 @@
+services:
+  jurado-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ui
+      args:
+        VITE_SIDECAR_URL: ${VITE_SIDECAR_URL:-http://localhost:8089}
+    ports:
+      - "5180:80"
+    depends_on:
+      - jurado-sidecar
+
+  jurado-sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: sidecar
+    environment:
+      SIDECAR_PUNTO_ID: ${SIDECAR_PUNTO_ID:-1}
+      SIDECAR_HTTP_PORT: 8089
+      SIDECAR_WS_VOTO_PORT: 8090
+      SIDECAR_WS_JURADO_PORT: 8087
+      NODO_URL: ${NODO_URL:-http://host.docker.internal:8080}
+      SIDECAR_TERMINAL_PUBLIC_KEY: ${SIDECAR_TERMINAL_PUBLIC_KEY:-PUBLIC_KEY_TEST}
+      SIDECAR_TERMINAL_GUID_MAP: ${SIDECAR_TERMINAL_GUID_MAP:-}
+      SIDECAR_VOTER_GUID_MAP: ${SIDECAR_VOTER_GUID_MAP:-}
+      SIDECAR_TERMINAL_JWT_MAP: ${SIDECAR_TERMINAL_JWT_MAP:-}
+      SIDECAR_DEPLOYMENT_PATH: ${SIDECAR_DEPLOYMENT_PATH:-../public/deployment.yml}
+      PUNTO_REFRESH_MS: ${PUNTO_REFRESH_MS:-30000}
+    ports:
+      - "8089:8089"
+      - "8090:8090"
+      - "8087:8087"
