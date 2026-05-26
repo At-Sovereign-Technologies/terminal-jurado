@@ -32,8 +32,13 @@ import * as ed from "@noble/ed25519";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const COLA_PATH = join(__dirname, "cola.json");
-const DEPLOYMENT_PATH = join(__dirname, "..", "public", "deployment.yml");
-const JURADO_CONFIG_PATH = join(__dirname, "..", "public", "jurado-config.json");
+const DEPLOYMENT_PATH =
+    process.env.SIDECAR_DEPLOYMENT_PATH ??
+    join(__dirname, "..", "public", "deployment.yml");
+const JURADO_CONFIG_PATH =
+    process.env.SIDECAR_JURADO_CONFIG_PATH ??
+    join(__dirname, "..", "public", "jurado-config.json");
+const ENV_PUNTO_ID = Number(process.env.SIDECAR_PUNTO_ID ?? "");
 
 const HTTP_PORT = Number(process.env.SIDECAR_HTTP_PORT ?? 8089);
 const WS_VOTO_PORT = Number(process.env.SIDECAR_WS_VOTO_PORT ?? 8090);
@@ -64,13 +69,38 @@ interface PuntoCargado {
     terminales: TerminalAutorizada[];
 }
 
+function resolverPuntoId(): number | null {
+    if (Number.isFinite(ENV_PUNTO_ID) && ENV_PUNTO_ID > 0) {
+        return ENV_PUNTO_ID;
+    }
+    if (!existsSync(JURADO_CONFIG_PATH)) return null;
+    try {
+        const cfg = JSON.parse(
+            readFileSync(JURADO_CONFIG_PATH, "utf-8")
+        ) as { puntoId?: number };
+        const puntoId = Number(cfg.puntoId ?? 0);
+        return Number.isFinite(puntoId) && puntoId > 0 ? puntoId : null;
+    } catch {
+        return null;
+    }
+}
+
 function cargarPunto(): PuntoCargado | null {
-    if (!existsSync(DEPLOYMENT_PATH) || !existsSync(JURADO_CONFIG_PATH)) {
+    if (!existsSync(DEPLOYMENT_PATH)) {
         console.warn(
-            "[jurado-sidecar] deployment.yml o jurado-config.json no encontrados; el sidecar arranca en modo PERMISIVO (no valida HELLO ni firmas)."
+            "[jurado-sidecar] deployment.yml no encontrado; el sidecar arranca en modo PERMISIVO (no valida HELLO ni firmas)."
         );
         return null;
     }
+
+    const puntoId = resolverPuntoId();
+    if (!puntoId) {
+        console.warn(
+            "[jurado-sidecar] puntoId no definido (SIDECAR_PUNTO_ID o jurado-config.json); modo PERMISIVO."
+        );
+        return null;
+    }
+
     try {
         const yaml = parseYaml(readFileSync(DEPLOYMENT_PATH, "utf-8")) as {
             puntos?: Array<{
@@ -84,14 +114,11 @@ function cargarPunto(): PuntoCargado | null {
                 }>;
             }>;
         };
-        const cfg = JSON.parse(
-            readFileSync(JURADO_CONFIG_PATH, "utf-8")
-        ) as { puntoId: number };
-        const punto = yaml.puntos?.find((p) => p.id === cfg.puntoId);
+        const punto = yaml.puntos?.find((p) => p.id === puntoId);
         if (!punto) {
             console.warn(
                 "[jurado-sidecar] puntoId %d no encontrado en deployment.yml; modo PERMISIVO.",
-                cfg.puntoId
+                puntoId
             );
             return null;
         }
@@ -115,15 +142,114 @@ function cargarPunto(): PuntoCargado | null {
     }
 }
 
+// ── Tipos y carga del deployment completo (eleccion + candidatos) ───────────
+
+interface FullDeploymentEleccion {
+    id: number;
+    nombre: string;
+    tipoEleccion: string;
+    fechaInicio: number;
+    fechaFin: number;
+}
+
+interface FullDeploymentCandidato {
+    id: number;
+    nombre: string;
+    documento: string;
+    partido: string;
+    fotoUrl?: string;
+}
+
+interface FullDeploymentVotante {
+    id: number;
+    nombre: string;
+    documento: string;
+}
+
+interface FullDeploymentTerminalCompleta {
+    id: number;
+    secreto?: string;
+    clavePublica?: string;
+    activo: boolean;
+    votantes: FullDeploymentVotante[];
+}
+
+interface FullDeploymentJurado {
+    id: number;
+    nombre: string;
+    documento: string;
+    usuario: string;
+    hash?: string;
+}
+
+interface FullDeploymentPuntoCompleto {
+    id: number;
+    nombre: string;
+    latitud: number;
+    longitud: number;
+    activo: boolean;
+    secreto?: string;
+    jurados: FullDeploymentJurado[];
+    terminales: FullDeploymentTerminalCompleta[];
+}
+
+interface FullDeploymentYaml {
+    eleccion?: FullDeploymentEleccion;
+    candidatos?: FullDeploymentCandidato[];
+    puntos: FullDeploymentPuntoCompleto[];
+}
+
+interface NodoPuestoResponse {
+    election?: {
+        id?: string;
+        name?: string;
+        electionType?: string;
+        startDate?: string;
+        endDate?: string;
+    };
+    candidates?: Array<{
+        id?: string;
+        name?: string;
+        document?: string;
+        party?: string;
+        photoUrl?: string;
+    }>;
+    votingPlace?: {
+        id?: string;
+        name?: string;
+        latitude?: number;
+        longitude?: number;
+        terminals?: Array<{ id?: string }>;
+    };
+    voters?: Array<{
+        id?: string;
+        name?: string;
+        document?: string;
+    }>;
+}
+
+function cargarFullDeployment(): FullDeploymentYaml | null {
+    if (!existsSync(DEPLOYMENT_PATH)) return null;
+    try {
+        return parseYaml(readFileSync(DEPLOYMENT_PATH, "utf-8")) as FullDeploymentYaml;
+    } catch (e) {
+        console.warn("[jurado-sidecar] Error cargando deployment completo:", e);
+        return null;
+    }
+}
+
 // `punto` se reasigna cada 30s al releer el deployment.yml. Si el Servidor
 // Electoral marcó terminales como inactivas, el watcher las desconecta.
 let punto = cargarPunto();
+let fullDeployment: FullDeploymentYaml | null = cargarFullDeployment();
 const PUNTO_REFRESH_MS = Number(process.env.PUNTO_REFRESH_MS ?? 30_000);
 
 setInterval(() => {
     const anterior = punto;
     const nuevo = cargarPunto();
     punto = nuevo;
+    fullDeployment = cargarFullDeployment();
+    guidMapPorTerminal.clear();
     if (!anterior || !nuevo) return;
     // Si alguna terminal pasó de activo:true → activo:false, cerramos su WS.
     for (const tNuevo of nuevo.terminales) {
@@ -187,6 +313,147 @@ function cargarCola(): VotoEnCola[] {
 
 function guardarCola() {
     writeFileSync(COLA_PATH, JSON.stringify(cola, null, 2), "utf-8");
+}
+
+// ── Mapa GUID para integración con el Nodo de Votación Activa ───────────────
+// El Nodo usa Guids; las terminales y el deployment usan enteros.
+// El sidecar hace la traducción al momento de reenviar cada voto.
+
+interface GuidMapCatalog {
+    voterDocToGuid: Record<string, string>;    // documento → UUID votante
+    voterIdToDoc: Record<number, string>;      // id entero → documento
+    candidateDocToGuid: Record<string, string>; // documento → UUID candidato
+    candidateIdToDoc: Record<number, string>;  // id entero → documento
+}
+
+interface GuidMap {
+    terminalGuid: string;
+    jwt: string;
+    voterDocToGuid: Record<string, string>;    // documento → UUID votante
+    voterIdToDoc: Record<number, string>;      // id entero → documento
+    candidateDocToGuid: Record<string, string>; // documento → UUID candidato
+    candidateIdToDoc: Record<number, string>;  // id entero → documento
+}
+
+const guidMapPorTerminal = new Map<number, GuidMap>();
+
+function construirCatalogoIds(
+    puntoData: FullDeploymentPuntoCompleto,
+    puestoData: NodoPuestoResponse
+): GuidMapCatalog {
+    const voterIdToDoc: Record<number, string> = {};
+    for (const t of puntoData.terminales) {
+        for (const v of (t.votantes ?? [])) {
+            voterIdToDoc[v.id] = v.documento;
+        }
+    }
+
+    const voterDocToGuid: Record<string, string> = {};
+    for (const v of (puestoData.voters ?? [])) {
+        if (v.document && v.id) voterDocToGuid[v.document] = v.id;
+    }
+
+    const candidateIdToDoc: Record<number, string> = {};
+    for (const [index, c] of (puestoData.candidates ?? []).entries()) {
+        if (c.document) candidateIdToDoc[index + 1] = c.document;
+    }
+
+    const candidateDocToGuid: Record<string, string> = {};
+    for (const c of (puestoData.candidates ?? [])) {
+        if (c.document && c.id) candidateDocToGuid[c.document] = c.id;
+    }
+
+    return {
+        voterDocToGuid,
+        voterIdToDoc,
+        candidateDocToGuid,
+        candidateIdToDoc,
+    };
+}
+
+async function inicializarGuidMap(): Promise<void> {
+    if (guidMapPorTerminal.size > 0) return;
+    if (!fullDeployment) {
+        console.warn("[jurado-sidecar] Sin deployment completo; no se puede inicializar GUID map.");
+        return;
+    }
+
+    const puntoId = punto?.id;
+    const puntoData = puntoId !== undefined
+        ? fullDeployment.puntos.find(p => p.id === puntoId)
+        : fullDeployment.puntos[0];
+
+    if (!puntoData) {
+        console.warn("[jurado-sidecar] Punto no encontrado en deployment al inicializar GUID map.");
+        return;
+    }
+
+    let puestoData: NodoPuestoResponse;
+    try {
+        const puestoRes = await fetch(
+            `${NODO_URL.replace(/\/$/, "")}/puesto`,
+            { signal: AbortSignal.timeout(5000) }
+        );
+        if (!puestoRes.ok) {
+            console.warn("[jurado-sidecar] GET /puesto del Nodo falló (HTTP %d).", puestoRes.status);
+            return;
+        }
+        puestoData = (await puestoRes.json()) as NodoPuestoResponse;
+    } catch (e) {
+        console.warn("[jurado-sidecar] Error consultando /puesto para GUID map:", e);
+        return;
+    }
+
+    const catalogo = construirCatalogoIds(puntoData, puestoData);
+
+    for (const terminal of puntoData.terminales) {
+        if (!terminal.secreto || !terminal.activo) continue;
+        try {
+            const loginRes = await fetch(
+                `${NODO_URL.replace(/\/$/, "")}/puesto/login`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ secret: terminal.secreto }),
+                    signal: AbortSignal.timeout(5000),
+                }
+            );
+            if (!loginRes.ok) {
+                console.warn("[jurado-sidecar] Login al Nodo rechazado (HTTP %d).", loginRes.status);
+                continue;
+            }
+            const loginData = (await loginRes.json()) as { token?: string; terminalId?: string };
+            if (!loginData.token || !loginData.terminalId) {
+                console.warn("[jurado-sidecar] Login al Nodo: respuesta sin token o terminalId.");
+                continue;
+            }
+
+            guidMapPorTerminal.set(terminal.id, {
+                terminalGuid: loginData.terminalId,
+                jwt: loginData.token,
+                ...catalogo,
+            });
+            console.info(
+                "[jurado-sidecar] GUID map listo para terminal local #%d (terminalGuid=%s).",
+                terminal.id,
+                loginData.terminalId,
+            );
+        } catch (e) {
+            console.warn("[jurado-sidecar] Error inicializando GUID map de terminal #%d:", terminal.id, e);
+        }
+    }
+
+    if (guidMapPorTerminal.size === 0) {
+        console.warn("[jurado-sidecar] No se pudo inicializar GUID map para ninguna terminal activa.");
+        return;
+    }
+
+    console.info(
+        "[jurado-sidecar] GUID map multi-terminal listo. Terminales=%d Voters=%d Candidates=%d",
+        guidMapPorTerminal.size,
+        Object.keys(catalogo.voterDocToGuid).length,
+        Object.keys(catalogo.candidateDocToGuid).length
+    );
 }
 
 function rechazar(ws: WebSocket, motivo: string) {
@@ -318,15 +585,58 @@ interface VotoRespuesta {
 }
 
 async function reenviarAlNodo(payload: unknown): Promise<VotoRespuesta> {
+    const typed = payload as {
+        voto?: { terminal?: number; votante?: number; candidato?: number; preferencias?: Record<string, number> };
+        firma?: string;
+    };
+    const terminal = typed?.voto?.terminal ?? 0;
+    const candidato = typed?.voto?.candidato ?? 0;
+
+    // Voto en blanco (candidato=0): confirmar localmente sin enviar al Nodo.
+    if (candidato === 0) {
+        return { ok: true, numeroConfirmacion: `BLANCO-${Date.now().toString(36).toUpperCase()}` };
+    }
+
+    // Asegurar que el mapa GUID esté disponible (se inicializa lazy si no arrancó).
+    if (!guidMapPorTerminal.has(terminal)) await inicializarGuidMap();
+    const guidMap = guidMapPorTerminal.get(terminal);
+    if (!guidMap) {
+        return { ok: false, motivo: `Terminal #${terminal} no tiene credenciales backend activas en el sidecar.` };
+    }
+
+    const votante = typed?.voto?.votante ?? 0;
+
+    // Traducir IDs enteros (deployment.yml) → GUIDs (Nodo).
+    const voterDoc = guidMap.voterIdToDoc[votante];
+    const voterId = voterDoc ? guidMap.voterDocToGuid[voterDoc] : undefined;
+    const candidateDoc = guidMap.candidateIdToDoc[candidato];
+    const candidateId = candidateDoc ? guidMap.candidateDocToGuid[candidateDoc] : undefined;
+
+    if (!voterId) {
+        return { ok: false, motivo: `Votante #${votante} no encontrado en el mapa de IDs.` };
+    }
+    if (!candidateId) {
+        return { ok: false, motivo: `Candidato #${candidato} no encontrado en el mapa de IDs.` };
+    }
+
     try {
-        const r = await fetch(`${NODO_URL.replace(/\/$/, "")}/votar`, {
+        const r = await fetch(`${NODO_URL.replace(/\/$/, "")}/puesto/votar`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${guidMap.jwt}`,
+            },
+            body: JSON.stringify({
+                votingTerminalId: guidMap.terminalGuid,
+                voterId,
+                candidateId,
+                signature: typed?.firma ?? "",
+            }),
             signal: AbortSignal.timeout(5000),
         });
         if (!r.ok) {
-            return { ok: false, motivo: `Nodo respondió HTTP ${r.status}` };
+            const errText = await r.text().catch(() => "");
+            return { ok: false, motivo: `Nodo respondió HTTP ${r.status}: ${errText}` };
         }
         const data = (await r.json().catch(() => ({}))) as {
             numeroConfirmacion?: string;
@@ -630,25 +940,28 @@ app.post("/eventos", (req: Request, res: Response) => {
 // Proxy de consulta de votante al Nodo (el SPA del Jurado no habla
 // directamente con el Nodo; todo sale del sidecar).
 app.get("/votante/:documento", async (req: Request, res: Response) => {
-    const doc = req.params.documento;
+    const docRaw = req.params.documento;
+    const doc = Array.isArray(docRaw) ? docRaw[0] : docRaw;
     try {
         const r = await fetch(
-            `${NODO_URL.replace(/\/$/, "")}/votante/${encodeURIComponent(doc)}`,
+            `${NODO_URL.replace(/\/$/g, "")}/puesto/votante/${encodeURIComponent(doc)}`,
             { signal: AbortSignal.timeout(3000) }
         );
         if (!r.ok) {
             return res.json({ votado: false, sinNodo: true });
         }
-        const data = (await r.json().catch(() => ({}))) as { votado?: boolean };
-        return res.json({ votado: !!data.votado });
+        // El Nodo retorna { voted: bool }; traducimos a { votado: bool } para el SPA.
+        const data = (await r.json().catch(() => ({}))) as { voted?: boolean };
+        return res.json({ votado: !!data.voted });
     } catch {
         return res.json({ votado: false, sinNodo: true });
     }
 });
 
-// Proxy de configuración activa del puesto/electión desde el Nodo.
-// El SPA del Jurado la consume al arranque para evitar depender de
-// información quemada en archivos locales.
+// Configuración activa del puesto/elección para el SPA del Jurado.
+// La fuente de verdad es el Nodo; el deployment local solo aporta metadatos
+// operativos que el backend todavía no comparte (jurados, asignación de
+// votantes a terminales y claves públicas/secretos para el sidecar).
 app.get("/puesto", async (_req: Request, res: Response) => {
     try {
         const r = await fetch(`${NODO_URL.replace(/\/$/, "")}/puesto`, {
@@ -659,21 +972,93 @@ app.get("/puesto", async (_req: Request, res: Response) => {
                 error: `No se pudo obtener /puesto del Nodo (HTTP ${r.status}).`,
             });
         }
-        const data = (await r.json().catch(() => null)) as unknown;
+        const data = (await r.json().catch(() => null)) as NodoPuestoResponse | null;
         if (!data || typeof data !== "object") {
-            return res
-                .status(502)
-                .json({ error: "Respuesta inválida del Nodo para /puesto." });
+            return res.status(502).json({ error: "Respuesta inválida del Nodo para /puesto." });
         }
-        return res.json(data);
+
+        const puntoData = punto?.id !== undefined
+            ? fullDeployment?.puntos.find(p => p.id === punto!.id)
+            : fullDeployment?.puntos[0];
+
+        const voterDocs = new Set((data.voters ?? []).map(v => String(v.document ?? "")).filter(Boolean));
+
+        // Formato PuestoApiResponse esperado por mapearPuestoApiADeployment en el SPA.
+        return res.json({
+            eleccion: {
+                id: 1,
+                nombre: data.election?.name ?? "",
+                tipo_eleccion: data.election?.electionType ?? "presidencial",
+                fecha_inicio: data.election?.startDate ? Math.floor(new Date(data.election.startDate).getTime() / 1000) : 0,
+                fecha_fin: data.election?.endDate ? Math.floor(new Date(data.election.endDate).getTime() / 1000) : 0,
+            },
+            candidatos: (data.candidates ?? []).map((c, index) => ({
+                id: index + 1,
+                nombre: c.name ?? "",
+                documento: c.document ?? "",
+                partido: c.party ?? "",
+                foto_url: c.photoUrl ?? "",
+            })),
+            punto: {
+                id: puntoData?.id ?? 1,
+                nombre: data.votingPlace?.name ?? puntoData?.nombre ?? "",
+                latitud: data.votingPlace?.latitude ?? puntoData?.latitud ?? 0,
+                longitud: data.votingPlace?.longitude ?? puntoData?.longitud ?? 0,
+                jurados: (puntoData?.jurados ?? []).map(j => ({
+                    id: j.id,
+                    nombre: j.nombre,
+                    documento: j.documento,
+                    usuario: j.usuario,
+                    hash: j.hash,
+                })),
+                terminales: (puntoData?.terminales ?? []).map(t => ({
+                    id: t.id,
+                    activo: t.activo,
+                    conectada: (() => {
+                        const ws = votoConnections.get(t.id);
+                        return !!ws && ws.readyState === ws.OPEN;
+                    })(),
+                    votantes: (t.votantes ?? []).filter(v => voterDocs.has(v.documento)).map(v => ({
+                        id: v.id,
+                        nombre: v.nombre,
+                        documento: v.documento,
+                    })),
+                })),
+            },
+        });
     } catch (e) {
         return res.status(503).json({
-            error:
-                e instanceof Error
-                    ? e.message
-                    : "No se pudo contactar al Nodo para /puesto.",
+            error: e instanceof Error ? e.message : "Error generando /puesto.",
         });
     }
+});
+
+// Disponibilidad de terminales para el SPA de votación antes de abrir WS.
+app.get("/terminales", (_req: Request, res: Response) => {
+    const puntoData = punto?.id !== undefined
+        ? fullDeployment?.puntos.find(p => p.id === punto!.id)
+        : fullDeployment?.puntos[0];
+
+    if (!puntoData) {
+        return res.status(503).json({
+            error: "No hay punto cargado en deployment para listar terminales.",
+        });
+    }
+
+    return res.json({
+        puntoId: puntoData.id,
+        terminales: puntoData.terminales.map((t) => {
+            const ws = votoConnections.get(t.id);
+            const conectada = !!ws && ws.readyState === ws.OPEN;
+            return {
+                id: t.id,
+                activo: t.activo,
+                conectada,
+                disponible: t.activo && !conectada,
+                votantesAsignados: (t.votantes ?? []).length,
+            };
+        }),
+    });
 });
 
 app.get("/health", (_req, res) =>
@@ -697,3 +1082,17 @@ httpServer.listen(HTTP_PORT, () => {
         );
     }
 });
+
+// Inicializar el mapa GUID en background (2 s de gracia para que el Nodo arranque).
+// Si no está disponible al arranque, se reintentará al llegar el primer voto.
+setTimeout(() => {
+    inicializarGuidMap()
+        .then(() => {
+            if (guidMapPorTerminal.size === 0) {
+                console.warn(
+                    "[jurado-sidecar] GUID map no disponible al arranque; se reintentará al primer voto."
+                );
+            }
+        })
+        .catch(e => console.warn("[jurado-sidecar] Error arrancando GUID map:", e));
+}, 2000);

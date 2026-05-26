@@ -7,11 +7,16 @@
 import type { Deployment, DeploymentPunto } from "../types/deployment";
 import type { JuradoConfig } from "../types/jurado";
 
-const CONFIG_PATH = "/jurado-config.json";
-const SIDECAR_URL =
-    (
-        import.meta.env as unknown as { VITE_SIDECAR_URL?: string }
-    ).VITE_SIDECAR_URL?.trim() || "http://localhost:8089";
+const ENV = import.meta.env as unknown as {
+    VITE_SIDECAR_URL?: string;
+    VITE_JURADO_CONFIG_PATH?: string;
+    VITE_JURADO_PUNTO_ID?: string;
+    VITE_JURADO_SECRETO?: string;
+    VITE_JURADO_CLUSTER_URL?: string;
+};
+
+const CONFIG_PATH = ENV.VITE_JURADO_CONFIG_PATH?.trim() || "/jurado-config.json";
+const SIDECAR_URL = ENV.VITE_SIDECAR_URL?.trim() || "http://localhost:8089";
 
 interface PuestoApiResponse {
     eleccion?: {
@@ -74,6 +79,14 @@ async function fetchTexto(path: string): Promise<string> {
         );
     }
     return r.text();
+}
+
+async function fetchTextoOpcional(path: string): Promise<string | null> {
+    try {
+        return await fetchTexto(path);
+    } catch {
+        return null;
+    }
 }
 
 async function fetchPuestoActivo(): Promise<PuestoApiResponse> {
@@ -159,26 +172,39 @@ function mapearPuestoApiADeployment(api: PuestoApiResponse): Deployment {
     };
 }
 
+function construirConfigDesdeEnv(base?: JuradoConfig): JuradoConfig {
+    const puntoId = Number(ENV.VITE_JURADO_PUNTO_ID ?? base?.puntoId ?? 0);
+    return {
+        puntoId,
+        secreto: ENV.VITE_JURADO_SECRETO?.trim() || base?.secreto || "",
+        clusterUrl: ENV.VITE_JURADO_CLUSTER_URL?.trim() || base?.clusterUrl || "",
+    };
+}
+
 export async function cargarContextoJurado(): Promise<ContextoJurado> {
     const [configTexto, puestoApi] = await Promise.all([
-        fetchTexto(CONFIG_PATH),
+        fetchTextoOpcional(CONFIG_PATH),
         fetchPuestoActivo(),
     ]);
 
     const deployment = mapearPuestoApiADeployment(puestoApi);
 
-    let config: JuradoConfig;
-    try {
-        config = JSON.parse(configTexto) as JuradoConfig;
-    } catch (e) {
-        throw new ErrorConfiguracion(
-            `jurado-config.json mal formado: ${e instanceof Error ? e.message : String(e)}`
-        );
+    let configBase: JuradoConfig | undefined;
+    if (configTexto) {
+        try {
+            configBase = JSON.parse(configTexto) as JuradoConfig;
+        } catch (e) {
+            throw new ErrorConfiguracion(
+                `jurado-config.json mal formado: ${e instanceof Error ? e.message : String(e)}`
+            );
+        }
     }
+
+    const config = construirConfigDesdeEnv(configBase);
 
     if (!config.puntoId || !config.secreto || !config.clusterUrl) {
         throw new ErrorConfiguracion(
-            "jurado-config.json incompleto: faltan puntoId, secreto o clusterUrl."
+            "Configuración incompleta: faltan puntoId, secreto o clusterUrl (env o jurado-config.json)."
         );
     }
     if (!deployment.puntos?.length) {

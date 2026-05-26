@@ -1,32 +1,31 @@
-eleccion:
-  id: 1
-  nombre: Elección Presidencial 2026
-  tipoEleccion: presidencial
-  fechaInicio: 1748678400
-  fechaFin: 1748707200
+# La fuente de verdad para elección y candidatos ahora es active-voting-service.
+# Se dejan comentados aquí para evitar duplicidad de datos con el backend.
+# eleccion:
+#   id: 1
+#   nombre: Elección Presidencial 2026
+#   tipoEleccion: presidencial
+#   fechaInicio: 1748678400
+#   fechaFin: 1748707200
 
-candidatos:
-  - id: 1
-    nombre: Juan Pablo Rodríguez
-    documento: "1000000001"
-    partido: Partido Alpha
-    fotoUrl: ""
-  - id: 2
-    nombre: Elena Gómez
-    documento: "1000000002"
-    partido: Movimiento Beta
-    fotoUrl: ""
-  - id: 3
-    nombre: Ricardo Valencia
-    documento: "1000000003"
-    partido: Coalición Gamma
-    fotoUrl: ""
+# candidatos:
+#   - id: 1
+#     nombre: Juan Pablo Rodríguez
+#     documento: "1000000001"
+#     partido: Partido Alpha
+#     fotoUrl: ""
+#   - id: 2
+#     nombre: Elena Gómez
+#     documento: "1000000002"
+#     partido: Movimiento Beta
+#     fotoUrl: ""
+#   - id: 3
+#     nombre: Ricardo Valencia
+#     documento: "1000000003"
+#     partido: Coalición Gamma
+#     fotoUrl: ""
 
-# NOTA DEMO: en producción cada terminal del puesto es una máquina física
-# distinta con su propia IP/DNS. En esta demo solo levantamos UN sidecar
-# (Terminal #1, puerto 8090), así que todos los votantes están asignados
-# a esa terminal. Para probar Terminal #2 en demo se necesitaría arrancar
-# un segundo SPA en puerto 5174 con sidecar en :8092.
+# NOTA DEMO: modelo "cada mesa = una terminal".
+# Para pruebas locales, las terminales comparten la misma clave pública demo.
 
 puntos:
   - id: 1
@@ -50,20 +49,27 @@ puntos:
           - id: 101
             nombre: Andrés Mora
             documento: "1010101010"
+      - id: 2
+        secreto: "demo-terminal-2-secret"
+        clavePublica: "ac5eff87b69c511c6fbae77e127de867aca6756711ce15f0c8df0f42e911b14a"
+        activo: true
+        votantes:
           - id: 102
             nombre: Sara Beltrán
             documento: "1020202020"
+      - id: 3
+        secreto: "demo-terminal-3-secret"
+        clavePublica: "ac5eff87b69c511c6fbae77e127de867aca6756711ce15f0c8df0f42e911b14a"
+        activo: true
+        votantes:
           - id: 103
             nombre: Camilo Salinas
             documento: "1030303030"
+      - id: 4
+        secreto: "demo-terminal-4-secret"
+        clavePublica: "ac5eff87b69c511c6fbae77e127de867aca6756711ce15f0c8df0f42e911b14a"
+        activo: true
+        votantes:
           - id: 104
             nombre: Diana Rojas
             documento: "1040404040"
-      - id: 2
-        secreto: "<jwt-de-terminal-2>"
-        clavePublica: "302a300506032b65700321001122aabb..."
-        # Marcar `activo: false` en demo si solo tienes un sidecar corriendo.
-        # Así la UI del jurado la muestra como FUERA DE SERVICIO en vez de
-        # dejarte intentar autorizar sesiones que fallarán con Network Error.
-        activo: false
-        votantes: []
