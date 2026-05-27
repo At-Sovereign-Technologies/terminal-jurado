@@ -283,6 +283,7 @@ if (fullDeployment) {
     }
 }
 const PUNTO_REFRESH_MS = Number(process.env.PUNTO_REFRESH_MS ?? 30_000);
+const NODO_INIT_RETRY_MS = Number(process.env.NODO_INIT_RETRY_MS ?? 5_000);
 const secretoPorTerminalLocal = new Map<number, string>();
 const jwtPorTerminalLocal = new Map<number, string>();
 
@@ -1288,16 +1289,29 @@ httpServer.listen(HTTP_PORT, () => {
     }
 });
 
-// Inicializar el mapa GUID en background (2 s de gracia para que el Nodo arranque).
-// Si no está disponible al arranque, se reintentará al llegar el primer voto.
-setTimeout(() => {
+// Conectar con el Nodo en background, reintentando cada NODO_INIT_RETRY_MS hasta lograrlo.
+// Permite levantar todos los servicios al mismo tiempo sin depender del orden de arranque.
+function conectarConNodoConRetry(intento = 1): void {
+    if (guidMapPorTerminal.size > 0) return;
+    console.info("[jurado-sidecar] Conectando con Nodo (intento #%d)...", intento);
     inicializarGuidMap()
         .then(() => {
-            if (guidMapPorTerminal.size === 0) {
-                console.warn(
-                    "[jurado-sidecar] GUID map no disponible al arranque; se reintentará al primer voto."
+            if (guidMapPorTerminal.size > 0) {
+                console.info(
+                    "[jurado-sidecar] Conexión con Nodo establecida tras %d intento(s).",
+                    intento
                 );
+            } else {
+                console.warn(
+                    "[jurado-sidecar] Nodo no listo aún; reintentando en %d ms...",
+                    NODO_INIT_RETRY_MS
+                );
+                setTimeout(() => conectarConNodoConRetry(intento + 1), NODO_INIT_RETRY_MS);
             }
         })
-        .catch(e => console.warn("[jurado-sidecar] Error arrancando GUID map:", e));
-}, 2000);
+        .catch(() => {
+            setTimeout(() => conectarConNodoConRetry(intento + 1), NODO_INIT_RETRY_MS);
+        });
+}
+
+setTimeout(() => conectarConNodoConRetry(), NODO_INIT_RETRY_MS);
